@@ -104,39 +104,39 @@ type wireTag struct {
 }
 
 type wireAccount struct {
-	ID            string `json:"id"`
-	Username      string `json:"username"`
-	Acct          string `json:"acct"`
-	DisplayName   string `json:"display_name"`
-	Note          string `json:"note"`
-	URL           string `json:"url"`
-	FollowersCount int   `json:"followers_count"`
-	FollowingCount int   `json:"following_count"`
-	StatusesCount  int   `json:"statuses_count"`
-	CreatedAt     string `json:"created_at"`
-	Locked        bool   `json:"locked"`
-	Bot           bool   `json:"bot"`
+	ID             string `json:"id"`
+	Username       string `json:"username"`
+	Acct           string `json:"acct"`
+	DisplayName    string `json:"display_name"`
+	Note           string `json:"note"`
+	URL            string `json:"url"`
+	FollowersCount int    `json:"followers_count"`
+	FollowingCount int    `json:"following_count"`
+	StatusesCount  int    `json:"statuses_count"`
+	CreatedAt      string `json:"created_at"`
+	Locked         bool   `json:"locked"`
+	Bot            bool   `json:"bot"`
 }
 
 type wireStatus struct {
-	ID          string      `json:"id"`
-	CreatedAt   string      `json:"created_at"`
-	URL         string      `json:"url"`
-	Content     string      `json:"content"`
-	Account     wireAccount `json:"account"`
-	ReblogsCount   int     `json:"reblogs_count"`
-	FavouritesCount int    `json:"favourites_count"`
-	RepliesCount   int     `json:"replies_count"`
-	Language    string      `json:"language"`
-	Sensitive   bool        `json:"sensitive"`
+	ID              string      `json:"id"`
+	CreatedAt       string      `json:"created_at"`
+	URL             string      `json:"url"`
+	Content         string      `json:"content"`
+	Account         wireAccount `json:"account"`
+	ReblogsCount    int         `json:"reblogs_count"`
+	FavouritesCount int         `json:"favourites_count"`
+	RepliesCount    int         `json:"replies_count"`
+	Language        string      `json:"language"`
+	Sensitive       bool        `json:"sensitive"`
 }
 
 type wireLink struct {
-	URL         string `json:"url"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
+	URL          string `json:"url"`
+	Title        string `json:"title"`
+	Description  string `json:"description"`
 	ProviderName string `json:"provider_name"`
-	History []struct {
+	History      []struct {
 		Day      string `json:"day"`
 		Accounts string `json:"accounts"`
 		Uses     string `json:"uses"`
