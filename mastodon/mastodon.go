@@ -1,59 +1,256 @@
 // Package mastodon is the library behind the mastodon command line:
-// the HTTP client, request shaping, and the typed data models for mastodon.
+// the HTTP client, request shaping, and the typed data models for mastodon.social.
 //
-// The Client here is the spine every command shares. It sets a real
-// User-Agent, paces requests so a busy session stays polite, and retries the
-// transient failures (429 and 5xx) that any public site throws under load.
-// Build your endpoint calls and JSON decoding on top of it.
+// All endpoints used here are public and require no authentication.
 package mastodon
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 )
 
-// DefaultUserAgent identifies the client to mastodon. A real, honest
-// User-Agent is both polite and the thing most likely to keep you unblocked.
-const DefaultUserAgent = "mastodon/dev (+https://github.com/tamnd/mastodon-cli)"
+// Host is the Mastodon instance this client talks to.
+const Host = "mastodon.social"
 
-// Host is the site this client talks to, and the host the URI driver in
-// domain.go claims. The scaffold points it at mastodon.com; change it once you
-// know the real endpoints you want to read.
-const Host = "mastodon.com"
+// BaseURL is the root every v1 request is built from.
+const BaseURL = "https://" + Host + "/api/v1"
 
-// BaseURL is the root every request is built from.
-const BaseURL = "https://" + Host
+// htmlRE strips HTML tags from content fields.
+var htmlRE = regexp.MustCompile(`<[^>]+>`)
 
-// Client talks to mastodon over HTTP.
+func stripHTML(s string) string {
+	s = htmlRE.ReplaceAllString(s, "")
+	s = strings.Join(strings.Fields(s), " ")
+	return strings.TrimSpace(s)
+}
+
+// --- Output types ---
+
+// Tag is a trending hashtag.
+type Tag struct {
+	Name     string `json:"name"`
+	URL      string `json:"url"`
+	Accounts int    `json:"accounts"`
+	Uses     int    `json:"uses"`
+}
+
+// Status is a Mastodon post/toot.
+type Status struct {
+	ID          string `json:"id"`
+	CreatedAt   string `json:"created_at"`
+	URL         string `json:"url"`
+	Content     string `json:"content"`
+	Author      string `json:"author"`
+	DisplayName string `json:"display_name"`
+	Reblogs     int    `json:"reblogs"`
+	Favourites  int    `json:"favourites"`
+	Replies     int    `json:"replies"`
+	Language    string `json:"language"`
+	Sensitive   bool   `json:"sensitive"`
+}
+
+// Link is a trending article/link shared on Mastodon.
+type Link struct {
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Provider    string `json:"provider"`
+	Accounts    int    `json:"accounts"`
+	Uses        int    `json:"uses"`
+}
+
+// Account is a Mastodon user profile.
+type Account struct {
+	ID          string `json:"id"`
+	Username    string `json:"username"`
+	DisplayName string `json:"display_name"`
+	Note        string `json:"note"`
+	URL         string `json:"url"`
+	Followers   int    `json:"followers"`
+	Following   int    `json:"following"`
+	Statuses    int    `json:"statuses"`
+	CreatedAt   string `json:"created_at"`
+	Bot         bool   `json:"bot"`
+}
+
+// Instance holds Mastodon instance statistics.
+type Instance struct {
+	URI         string `json:"uri"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Users       int    `json:"users"`
+	Statuses    int    `json:"statuses"`
+	Domains     int    `json:"domains"`
+	Version     string `json:"version"`
+}
+
+// --- Wire types (API response shapes) ---
+
+type wireTag struct {
+	Name    string `json:"name"`
+	URL     string `json:"url"`
+	History []struct {
+		Day      string `json:"day"`
+		Accounts string `json:"accounts"`
+		Uses     string `json:"uses"`
+	} `json:"history"`
+}
+
+type wireAccount struct {
+	ID            string `json:"id"`
+	Username      string `json:"username"`
+	Acct          string `json:"acct"`
+	DisplayName   string `json:"display_name"`
+	Note          string `json:"note"`
+	URL           string `json:"url"`
+	FollowersCount int   `json:"followers_count"`
+	FollowingCount int   `json:"following_count"`
+	StatusesCount  int   `json:"statuses_count"`
+	CreatedAt     string `json:"created_at"`
+	Locked        bool   `json:"locked"`
+	Bot           bool   `json:"bot"`
+}
+
+type wireStatus struct {
+	ID          string      `json:"id"`
+	CreatedAt   string      `json:"created_at"`
+	URL         string      `json:"url"`
+	Content     string      `json:"content"`
+	Account     wireAccount `json:"account"`
+	ReblogsCount   int     `json:"reblogs_count"`
+	FavouritesCount int    `json:"favourites_count"`
+	RepliesCount   int     `json:"replies_count"`
+	Language    string      `json:"language"`
+	Sensitive   bool        `json:"sensitive"`
+}
+
+type wireLink struct {
+	URL         string `json:"url"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	ProviderName string `json:"provider_name"`
+	History []struct {
+		Day      string `json:"day"`
+		Accounts string `json:"accounts"`
+		Uses     string `json:"uses"`
+	} `json:"history"`
+}
+
+type wireInstance struct {
+	URI              string `json:"uri"`
+	Title            string `json:"title"`
+	Description      string `json:"description"`
+	ShortDescription string `json:"short_description"`
+	Stats            struct {
+		UserCount   int `json:"user_count"`
+		StatusCount int `json:"status_count"`
+		DomainCount int `json:"domain_count"`
+	} `json:"stats"`
+	Version string `json:"version"`
+}
+
+// --- converters ---
+
+func (w wireTag) toTag() *Tag {
+	t := &Tag{Name: w.Name, URL: w.URL}
+	if len(w.History) > 0 {
+		t.Accounts, _ = strconv.Atoi(w.History[0].Accounts)
+		t.Uses, _ = strconv.Atoi(w.History[0].Uses)
+	}
+	return t
+}
+
+func (w wireStatus) toStatus() *Status {
+	return &Status{
+		ID:          w.ID,
+		CreatedAt:   w.CreatedAt,
+		URL:         w.URL,
+		Content:     stripHTML(w.Content),
+		Author:      w.Account.Acct,
+		DisplayName: w.Account.DisplayName,
+		Reblogs:     w.ReblogsCount,
+		Favourites:  w.FavouritesCount,
+		Replies:     w.RepliesCount,
+		Language:    w.Language,
+		Sensitive:   w.Sensitive,
+	}
+}
+
+func (w wireLink) toLink() *Link {
+	l := &Link{
+		URL:         w.URL,
+		Title:       w.Title,
+		Description: w.Description,
+		Provider:    w.ProviderName,
+	}
+	if len(w.History) > 0 {
+		l.Accounts, _ = strconv.Atoi(w.History[0].Accounts)
+		l.Uses, _ = strconv.Atoi(w.History[0].Uses)
+	}
+	return l
+}
+
+func (w wireAccount) toAccount() *Account {
+	return &Account{
+		ID:          w.ID,
+		Username:    w.Username,
+		DisplayName: w.DisplayName,
+		Note:        stripHTML(w.Note),
+		URL:         w.URL,
+		Followers:   w.FollowersCount,
+		Following:   w.FollowingCount,
+		Statuses:    w.StatusesCount,
+		CreatedAt:   w.CreatedAt,
+		Bot:         w.Bot,
+	}
+}
+
+func (w wireInstance) toInstance() *Instance {
+	desc := w.ShortDescription
+	if desc == "" {
+		desc = w.Description
+	}
+	return &Instance{
+		URI:         w.URI,
+		Title:       w.Title,
+		Description: stripHTML(desc),
+		Users:       w.Stats.UserCount,
+		Statuses:    w.Stats.StatusCount,
+		Domains:     w.Stats.DomainCount,
+		Version:     w.Version,
+	}
+}
+
+// --- Client ---
+
+// Client talks to mastodon.social over HTTP.
 type Client struct {
 	HTTP      *http.Client
 	UserAgent string
-	// Rate is the minimum gap between requests. Zero means no pacing.
-	Rate    time.Duration
-	Retries int
+	Rate      time.Duration
+	Retries   int
 
 	last time.Time
 }
 
-// NewClient returns a Client with sensible defaults: a 30s timeout, a 200ms
-// minimum gap between requests, and five retries on transient errors.
+// NewClient returns a Client with sensible defaults.
 func NewClient() *Client {
 	return &Client{
-		HTTP:      &http.Client{Timeout: 30 * time.Second},
-		UserAgent: DefaultUserAgent,
-		Rate:      200 * time.Millisecond,
-		Retries:   5,
+		HTTP:      &http.Client{Timeout: 15 * time.Second},
+		UserAgent: "mastodon-cli/0.1 (tamnd87@gmail.com)",
+		Rate:      500 * time.Millisecond,
+		Retries:   3,
 	}
 }
 
-// Get fetches url and returns the response body. It paces and retries according
-// to the client's settings. The caller owns nothing extra; the body is read
-// fully and closed here.
+// Get fetches a URL and returns the body bytes.
 func (c *Client) Get(ctx context.Context, url string) ([]byte, error) {
 	var lastErr error
 	for attempt := 0; attempt <= c.Retries; attempt++ {
@@ -83,6 +280,7 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 		return nil, false, err
 	}
 	req.Header.Set("User-Agent", c.UserAgent)
+	req.Header.Set("Accept", "application/json")
 
 	resp, err := c.HTTP.Do(req)
 	if err != nil {
@@ -104,7 +302,6 @@ func (c *Client) do(ctx context.Context, url string) (body []byte, retry bool, e
 	return b, false, nil
 }
 
-// pace blocks until at least Rate has passed since the previous request.
 func (c *Client) pace() {
 	if c.Rate <= 0 {
 		return
@@ -123,78 +320,105 @@ func backoff(attempt int) time.Duration {
 	return d
 }
 
-// Page is the scaffold's one example record: a single page, addressed by the
-// path that names it on mastodon.com. It is a stand-in for the typed records you
-// will model from the real mastodon endpoints. The kit struct tags make it
-// addressable as a resource URI (see domain.go): ID is the URI id, and Body is
-// the long text `mastodon cat` and the Markdown export print.
-type Page struct {
-	ID    string `json:"id" kit:"id"`
-	URL   string `json:"url"`
-	Title string `json:"title,omitempty"`
-	Body  string `json:"body,omitempty" kit:"body"`
-}
+// --- API methods ---
 
-// GetPage fetches one page by its path (for example "wiki/Go") and returns it as
-// a record. The scaffold keeps a plain-text preview of the response as the body;
-// replace the parsing with the real fields once you know the endpoint's shape.
-func (c *Client) GetPage(ctx context.Context, path string) (*Page, error) {
-	path = strings.Trim(path, "/")
-	url := BaseURL + "/" + path
+// Trends fetches trending hashtags.
+func (c *Client) Trends(ctx context.Context, limit int) ([]*Tag, error) {
+	url := fmt.Sprintf("%s/trends/tags?limit=%d", BaseURL, limit)
 	body, err := c.Get(ctx, url)
 	if err != nil {
 		return nil, err
 	}
-	return &Page{ID: path, URL: url, Title: path, Body: pageText(body)}, nil
-}
-
-// PageLinks fetches a page and returns the same-host pages it links to, as page
-// stubs. It shows the member-listing pattern the URI driver relies on: every
-// stub carries enough (an id and a URL) to be addressed and followed on its own.
-func (c *Client) PageLinks(ctx context.Context, path string, limit int) ([]*Page, error) {
-	path = strings.Trim(path, "/")
-	body, err := c.Get(ctx, BaseURL+"/"+path)
-	if err != nil {
-		return nil, err
+	var wire []wireTag
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("trends: %w", err)
 	}
-	var out []*Page
-	seen := map[string]bool{}
-	for _, p := range linkPaths(body) {
-		if seen[p] {
-			continue
-		}
-		seen[p] = true
-		out = append(out, &Page{ID: p, URL: BaseURL + "/" + p})
-		if limit > 0 && len(out) >= limit {
-			break
-		}
+	out := make([]*Tag, 0, len(wire))
+	for _, w := range wire {
+		out = append(out, w.toTag())
 	}
 	return out, nil
 }
 
-var (
-	hrefRE = regexp.MustCompile(`href="(/[^":#?]+)"`)
-	tagRE  = regexp.MustCompile(`<[^>]+>`)
-)
-
-// linkPaths pulls the relative link targets out of an HTML response, so a list
-// op can turn each into an addressable page stub.
-func linkPaths(body []byte) []string {
-	var out []string
-	for _, m := range hrefRE.FindAllSubmatch(body, -1) {
-		if p := strings.Trim(string(m[1]), "/"); p != "" {
-			out = append(out, p)
-		}
+// Posts fetches trending statuses.
+func (c *Client) Posts(ctx context.Context, limit int) ([]*Status, error) {
+	url := fmt.Sprintf("%s/trends/statuses?limit=%d", BaseURL, limit)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
 	}
-	return out
+	var wire []wireStatus
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("posts: %w", err)
+	}
+	out := make([]*Status, 0, len(wire))
+	for _, w := range wire {
+		out = append(out, w.toStatus())
+	}
+	return out, nil
 }
 
-// pageText reduces an HTML response to a short plain-text preview, a stand-in
-// for the typed extract a real endpoint would hand you.
-func pageText(body []byte) string {
-	s := strings.Join(strings.Fields(tagRE.ReplaceAllString(string(body), " ")), " ")
-	if len(s) > 500 {
-		s = s[:500]
+// Links fetches trending links/articles.
+func (c *Client) Links(ctx context.Context, limit int) ([]*Link, error) {
+	url := fmt.Sprintf("%s/trends/links?limit=%d", BaseURL, limit)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
 	}
-	return s
+	var wire []wireLink
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("links: %w", err)
+	}
+	out := make([]*Link, 0, len(wire))
+	for _, w := range wire {
+		out = append(out, w.toLink())
+	}
+	return out, nil
+}
+
+// Timeline fetches statuses tagged with a hashtag.
+func (c *Client) Timeline(ctx context.Context, hashtag string, limit int) ([]*Status, error) {
+	hashtag = strings.TrimPrefix(hashtag, "#")
+	url := fmt.Sprintf("%s/timelines/tag/%s?limit=%d", BaseURL, hashtag, limit)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var wire []wireStatus
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("timeline: %w", err)
+	}
+	out := make([]*Status, 0, len(wire))
+	for _, w := range wire {
+		out = append(out, w.toStatus())
+	}
+	return out, nil
+}
+
+// Account fetches a user profile by username.
+func (c *Client) Account(ctx context.Context, username string) (*Account, error) {
+	url := fmt.Sprintf("%s/accounts/lookup?acct=%s", BaseURL, username)
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var wire wireAccount
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("account: %w", err)
+	}
+	return wire.toAccount(), nil
+}
+
+// Instance fetches instance statistics.
+func (c *Client) Instance(ctx context.Context) (*Instance, error) {
+	url := BaseURL + "/instance"
+	body, err := c.Get(ctx, url)
+	if err != nil {
+		return nil, err
+	}
+	var wire wireInstance
+	if err := json.Unmarshal(body, &wire); err != nil {
+		return nil, fmt.Errorf("instance: %w", err)
+	}
+	return wire.toInstance(), nil
 }
